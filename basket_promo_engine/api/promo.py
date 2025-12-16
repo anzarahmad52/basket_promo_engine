@@ -1,7 +1,6 @@
 import frappe
 from frappe.utils import flt
 
-
 PROMO_TAG = "BASKET_PROMO"
 
 
