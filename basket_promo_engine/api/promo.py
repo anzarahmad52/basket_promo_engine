@@ -1,14 +1,16 @@
 import frappe
 from frappe.utils import flt
-from frappe.utils.nestedset import get_ancestors_of
 
 
 PROMO_TAG = "BASKET_PROMO"
 
 
 def apply_promotions(doc, method=None):
+    # Draft only
     if getattr(doc, "docstatus", 0) != 0:
         return
+
+    # Skip return docs
     if getattr(doc, "is_return", 0):
         return
 
@@ -34,6 +36,8 @@ def apply_promotions(doc, method=None):
     if not free_item_code:
         _remove_existing_promo_rows(doc)
         return
+
+    # clean old promo rows to avoid duplicates each save
     _remove_existing_promo_rows(doc)
 
     source_row = best_row_by_item.get(free_item_code) or _find_any_eligible_row(doc, eligible_items)
@@ -41,12 +45,19 @@ def apply_promotions(doc, method=None):
         return
 
     _add_free_row(doc, source_row, free_item_code, free_qty)
+
     _recalc(doc)
+
+
+# ---------------------------
+# RULE LOOKUP (parent + child customer groups supported)
+# ---------------------------
+
 def _get_matching_rule(doc) -> dict | None:
     """
     Picks the best matching Basket Promo Rule based on:
     - enabled
-    - customer_group (supports parent rules for child groups)
+    - customer_group: rule group can be the same as doc group OR a PARENT of doc group (applies to all children)
     - company (optional)
     - priority (higher first)
     """
@@ -55,35 +66,67 @@ def _get_matching_rule(doc) -> dict | None:
 
     if not customer_group:
         return None
-    groups = [customer_group]
-    try:
-        groups += get_ancestors_of("Customer Group", customer_group) or []
-    except Exception:
-        pass
 
+    # Get lft/rgt for selected customer group (nested set)
+    cg = frappe.db.get_value("Customer Group", customer_group, ["lft", "rgt"], as_dict=True)
+    if not cg:
+        return None
+
+    doc_lft = flt(cg.lft)
+    doc_rgt = flt(cg.rgt)
+
+    # Fetch all enabled rules and pick best match in python
+    # (we must check ancestor/child relationship using lft/rgt)
     rules = frappe.get_all(
         "Basket Promo Rule",
-        filters={"enabled": 1, "customer_group": ["in", groups]},
+        filters={"enabled": 1},
         fields=["name", "company", "priority", "free_item_policy", "fixed_free_item_code", "customer_group"],
         order_by="priority desc, modified desc",
     )
 
     if not rules:
         return None
-    chosen = None
+
+    candidates = []
     for r in rules:
+        rule_cg = (r.customer_group or "").strip()
+        if not rule_cg:
+            continue
+
+        rule_lr = frappe.db.get_value("Customer Group", rule_cg, ["lft", "rgt"], as_dict=True)
+        if not rule_lr:
+            continue
+
+        rule_lft = flt(rule_lr.lft)
+        rule_rgt = flt(rule_lr.rgt)
+
+        # Rule applies if rule group is same as doc group OR rule group is an ancestor of doc group
+        applies_by_group = (rule_lft <= doc_lft <= doc_rgt <= rule_rgt)
+        if not applies_by_group:
+            continue
+
+        # Company match rules:
+        # - Prefer exact company match if rule has company
+        # - Otherwise allow company blank
+        company_ok = (not r.company) or (company and r.company == company)
+        if not company_ok:
+            continue
+
+        candidates.append(r)
+
+    if not candidates:
+        return None
+
+    # Prefer company-specific rule first (if any), otherwise generic
+    chosen = None
+    for r in candidates:
         if r.company and company and r.company == company:
             chosen = r
             break
     if not chosen:
-        for r in rules:
-            if not r.company:
-                chosen = r
-                break
+        chosen = candidates[0]
 
-    if not chosen:
-        return None
-
+    # Fetch child items + slabs
     eligible_items = frappe.get_all(
         "Basket Promo Rule Item",
         filters={"parent": chosen.name, "parenttype": "Basket Promo Rule"},
@@ -101,12 +144,17 @@ def _get_matching_rule(doc) -> dict | None:
         "name": chosen.name,
         "company": chosen.company,
         "priority": chosen.priority or 0,
-        "customer_group": chosen.customer_group,
         "free_item_policy": chosen.free_item_policy or "highest_qty",
         "fixed_free_item_code": chosen.fixed_free_item_code,
         "eligible_items": eligible_items,
         "slabs": slab_rows,
     }
+
+
+# ---------------------------
+# BASKET COMPUTE
+# ---------------------------
+
 def _compute_basket_qty(doc, eligible_items: set):
     basket_qty = 0.0
     item_qty_map = {}
@@ -127,6 +175,7 @@ def _compute_basket_qty(doc, eligible_items: set):
         basket_qty += qty
         item_qty_map[item_code] = item_qty_map.get(item_code, 0) + qty
 
+        # choose a best row to copy warehouse/uom/conversion_factor/accounts/taxes from
         if item_code not in best_row_by_item or qty > flt(best_row_by_item[item_code].qty):
             best_row_by_item[item_code] = row
 
@@ -136,9 +185,15 @@ def _compute_basket_qty(doc, eligible_items: set):
 def _get_free_qty_for_slab(basket_qty: float, slabs: list) -> float:
     for s in slabs:
         min_q = flt(s.get("min_qty"))
-        max_q = flt(s.get("max_qty") or 0)
+        max_q = flt(s.get("max_qty"))
         free_q = flt(s.get("free_qty"))
-        if min_q <= basket_qty and (max_q <= 0 or basket_qty < max_q):
+
+        # Support open-ended slab: max_qty blank/0 => infinity
+        if max_q <= 0:
+            if basket_qty >= min_q:
+                return free_q
+
+        if min_q <= basket_qty < max_q:
             return free_q
 
     return 0.0
@@ -150,20 +205,26 @@ def _select_free_item(rule: dict, item_qty_map: dict) -> str | None:
     if policy == "fixed_item":
         return (rule.get("fixed_free_item_code") or "").strip() or None
 
+    # default: highest purchased qty sku becomes free sku
     if not item_qty_map:
         return None
 
     return max(item_qty_map, key=item_qty_map.get)
+
+
+# ---------------------------
+# APPLY / CLEANUP
+# ---------------------------
+
 def _add_free_row(doc, source_row, item_code: str, qty: float):
     """
-    IMPORTANT:
-    Make sure mandatory fields are set, especially for Sales Invoice:
-    - income_account
-    - cost_center
-    and for Sales Order (often):
-    - delivery_date
-    - item_name
+    Append free row and fill mandatory fields required by ERPNext + ZATCA apps.
+
+    ZATCA app rule in your system:
+    If any one item has Item Tax Template, all items must have Item Tax Template.
+    So free row must copy item_tax_template (and tax_category if used).
     """
+
     delivery_date = getattr(source_row, "delivery_date", None) or getattr(doc, "delivery_date", None)
 
     row = doc.append("items", {
@@ -178,25 +239,30 @@ def _add_free_row(doc, source_row, item_code: str, qty: float):
         "delivery_date": delivery_date,
         "description": f"FREE ITEM ({PROMO_TAG})",
     })
+
+    # Mandatory UI field (to avoid "Item Name" missing popup)
     if not getattr(row, "item_name", None):
         row.item_name = frappe.db.get_value("Item", item_code, "item_name") or item_code
+
+    # Mandatory accounting fields (especially Sales Invoice)
     if hasattr(row, "income_account") and not getattr(row, "income_account", None):
         row.income_account = getattr(source_row, "income_account", None) or getattr(doc, "income_account", None)
 
     if hasattr(row, "cost_center") and not getattr(row, "cost_center", None):
         row.cost_center = getattr(source_row, "cost_center", None) or getattr(doc, "cost_center", None)
-    company = (getattr(doc, "company", None) or "").strip()
-    if company:
-        if hasattr(row, "cost_center") and not getattr(row, "cost_center", None):
-            row.cost_center = frappe.db.get_value("Company", company, "cost_center")
-        if hasattr(row, "income_account") and not getattr(row, "income_account", None):
-            row.income_account = frappe.db.get_value("Company", company, "default_income_account")
+
+    # ZATCA consistency: copy item tax template / tax category from source row
+    if hasattr(row, "item_tax_template"):
+        row.item_tax_template = getattr(source_row, "item_tax_template", None)
+
+    if hasattr(row, "tax_category"):
+        row.tax_category = getattr(source_row, "tax_category", None)
+
+    return row
 
 
 def _remove_existing_promo_rows(doc):
-    for r in list(doc.items):
-        if _is_promo_row(r):
-            doc.remove(r)
+    doc.items = [r for r in doc.items if not _is_promo_row(r)]
 
 
 def _is_promo_row(row) -> bool:
@@ -211,5 +277,6 @@ def _find_any_eligible_row(doc, eligible_items: set):
 
 
 def _recalc(doc):
+    # recalc totals after adding free row
     if hasattr(doc, "calculate_taxes_and_totals"):
         doc.calculate_taxes_and_totals()
