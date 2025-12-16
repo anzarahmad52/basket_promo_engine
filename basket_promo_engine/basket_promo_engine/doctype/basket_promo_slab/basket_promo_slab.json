@@ -1,0 +1,46 @@
+{
+ "actions": [],
+ "allow_import": 1,
+ "autoname": "hash",
+ "creation": "2025-01-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "min_qty",
+  "max_qty",
+  "free_qty"
+ ],
+ "fields": [
+  {
+   "fieldname": "min_qty",
+   "fieldtype": "Float",
+   "label": "Min Qty (inclusive)",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "max_qty",
+   "fieldtype": "Float",
+   "label": "Max Qty (exclusive)",
+   "reqd": 1,
+   "in_list_view": 1,
+   "description": "Use exclusive max to avoid overlap. Example: 10–20 means min=10, max=20."
+  },
+  {
+   "fieldname": "free_qty",
+   "fieldtype": "Float",
+   "label": "Free Qty",
+   "reqd": 1,
+   "in_list_view": 1
+  }
+ ],
+ "istable": 1,
+ "modified": "2025-12-16 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Basket Promo Engine",
+ "name": "Basket Promo Slab",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC"
+}

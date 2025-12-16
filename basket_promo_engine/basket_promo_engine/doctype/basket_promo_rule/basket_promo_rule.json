@@ -1,0 +1,32 @@
+{
+ "doctype": "DocType",
+ "name": "Basket Promo Slab",
+ "module": "Basket Promo Engine",
+ "istable": 1,
+ "autoname": "hash",
+ "engine": "InnoDB",
+ "field_order": ["min_qty", "max_qty", "free_qty"],
+ "fields": [
+  {
+   "fieldname": "min_qty",
+   "fieldtype": "Float",
+   "label": "Min Qty (inclusive)",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "max_qty",
+   "fieldtype": "Float",
+   "label": "Max Qty (exclusive)",
+   "description": "Leave blank or 0 for open-ended slab",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "free_qty",
+   "fieldtype": "Float",
+   "label": "Free Qty",
+   "reqd": 1,
+   "in_list_view": 1
+  }
+ ]
+}

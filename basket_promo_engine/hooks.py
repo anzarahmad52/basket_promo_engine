@@ -137,6 +137,17 @@ app_license = "mit"
 # ---------------
 # Hook on document methods and events
 
+doc_events = {
+    "Sales Order": {
+        "validate": "basket_promo_engine.api.promo.apply_promotions"
+    },
+    "Sales Invoice": {
+        "validate": "basket_promo_engine.api.promo.apply_promotions"
+    }
+}
+
+
+
 # doc_events = {
 # 	"*": {
 # 		"on_update": "method",
